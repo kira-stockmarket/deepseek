@@ -5,6 +5,8 @@ on:
     # Run daily at 3:00 PM IST (9:30 AM UTC)
     - cron: '30 9 * * *'
   workflow_dispatch:  # Allow manual trigger
+  push:
+    branches: [ main ]  # Optional: run on push to main
 
 jobs:
   scan:
@@ -12,15 +14,16 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4  # Updated from v3 to v4
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5  # Updated from v4 to v5
       with:
         python-version: '3.10'
+        cache: 'pip'  # Enable pip caching
     
     - name: Cache pip packages
-      uses: actions/cache@v3
+      uses: actions/cache@v4  # Updated from v3 to v4
       with:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
@@ -39,15 +42,18 @@ jobs:
         # Optional: Telegram notifications
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        # Set timezone to IST for correct timestamps
+        TZ: 'Asia/Kolkata'
       run: |
         python main.py --mode scan
     
     - name: Upload scan results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4  # Updated from v3 to v4
       with:
-        name: scan-results
+        name: scan-results-${{ github.run_id }}  # Unique name per run
         path: results/
         retention-days: 30
+        compression-level: 6  # Optional compression
     
     - name: Commit and push results
       run: |
