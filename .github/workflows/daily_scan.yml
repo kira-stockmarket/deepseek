@@ -1,0 +1,59 @@
+name: Daily IPO Base Breakout Scanner
+
+on:
+  schedule:
+    # Run daily at 3:00 PM IST (9:30 AM UTC)
+    - cron: '30 9 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Cache pip packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run daily scanner
+      env:
+        # Optional: Add Alpha Vantage API key
+        ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+        # Optional: Telegram notifications
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        python main.py --mode scan
+    
+    - name: Upload scan results
+      uses: actions/upload-artifact@v3
+      with:
+        name: scan-results
+        path: results/
+        retention-days: 30
+    
+    - name: Commit and push results
+      run: |
+        git config --global user.name 'GitHub Action'
+        git config --global user.email 'action@github.com'
+        git add results/
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Update scan results $(date +'%Y-%m-%d')" && git push)
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
