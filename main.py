@@ -1,199 +1,229 @@
 """
-IPO Base Breakout Strategy Implementation
-Enhanced with better base detection and volume analysis
+Main application for IPO Base Breakout Strategy
+With enhanced error handling for automation
 """
 
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
+import argparse
+from datetime import datetime
+import sys
+import os
+import traceback
+import logging
 
-class IPOBaseBreakoutStrategy:
-    def __init__(self, config):
-        self.config = config
-        
-    def calculate_indicators(self, df):
-        """
-        Calculate technical indicators for the strategy
-        """
-        if df is None or len(df) < 20:
-            return None
-            
-        df = df.copy()
-        
-        # Moving averages
-        df['MA5'] = df['Close'].rolling(window=5).mean()
-        df['MA10'] = df['Close'].rolling(window=10).mean()
-        df['MA20'] = df['Close'].rolling(window=20).mean()
-        df['MA50'] = df['Close'].rolling(window=50).mean()
-        df['MA200'] = df['Close'].rolling(window=200).mean()
-        
-        # Volume indicators
-        df['Volume_MA5'] = df['Volume'].rolling(window=5).mean()
-        df['Volume_MA10'] = df['Volume'].rolling(window=10).mean()
-        df['Volume_MA20'] = df['Volume'].rolling(window=20).mean()
-        df['Volume_MA50'] = df['Volume'].rolling(window=50).mean()
-        df['Volume_Ratio'] = df['Volume'] / df['Volume_MA20']
-        
-        # Price indicators
-        df['High_20'] = df['High'].rolling(window=20).max()
-        df['Low_20'] = df['Low'].rolling(window=20).min()
-        df['High_50'] = df['High'].rolling(window=50).max()
-        
-        # Volatility
-        df['TR'] = np.maximum(
-            df['High'] - df['Low'],
-            np.maximum(
-                abs(df['High'] - df['Close'].shift(1)),
-                abs(df['Low'] - df['Close'].shift(1))
-            )
-        )
-        df['ATR'] = df['TR'].rolling(window=14).mean()
-        df['ATR_Pct'] = (df['ATR'] / df['Close']) * 100
-        
-        # IPO Day High (first trading day high)
-        df['IPO_Day_High'] = df['High'].iloc[0] if len(df) > 0 else 0
-        
-        # Price position
-        df['Pct_From_High'] = ((df['Close'] - df['IPO_Day_High']) / df['IPO_Day_High']) * 100
-        
-        return df
+# Add src to path properly
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
+# Now import from src package
+try:
+    from config import Config
+    from data_fetcher import DataFetcher
+    from ipo_database import IPODatabase
+    from strategy import IPOBaseBreakoutStrategy
+    from backtest import BacktestEngine
+    from scanner import IPOBaseBreakoutScanner
+    from notifier import Notifier
+except ImportError as e:
+    print(f"Import error: {e}")
+    print("Trying alternative import...")
+    try:
+        from src.config import Config
+        from src.data_fetcher import DataFetcher
+        from src.ipo_database import IPODatabase
+        from src.strategy import IPOBaseBreakoutStrategy
+        from src.backtest import BacktestEngine
+        from src.scanner import IPOBaseBreakoutScanner
+        from src.notifier import Notifier
+    except ImportError as e2:
+        print(f"Alternative import also failed: {e2}")
+        print("Current directory:", os.getcwd())
+        print("Files in current directory:", os.listdir('.'))
+        if os.path.exists('src'):
+            print("Files in src directory:", os.listdir('src'))
+        sys.exit(1)
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('scanner.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+def print_banner():
+    """Print application banner"""
+    banner = """
+    ╔══════════════════════════════════════════════════════════════╗
+    ║         📈 IPO BASE BREAKOUT STRATEGY - INDIA 📈            ║
+    ╚══════════════════════════════════════════════════════════════╝
+    """
+    print(banner)
+    logger.info(f"Starting scanner at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+def ensure_directories(config):
+    """Ensure all required directories exist"""
+    dirs_to_create = [
+        config.DATA_DIR,
+        config.RESULTS_DIR
+    ]
     
-    def identify_base_formation(self, df):
-        """
-        Identify base formation pattern with improved detection
-        """
-        if df is None or len(df) < self.config.MIN_BASE_DAYS:
-            return []
-        
-        bases = []
-        
-        for i in range(self.config.MIN_LISTING_DAYS, len(df)):
-            # Check for potential base formation
-            if i + self.config.MIN_BASE_DAYS > len(df):
-                break
-                
-            # Look for consolidation pattern
-            base_candidates = self._check_base_pattern(df, i)
-            
-            if base_candidates:
-                bases.extend(base_candidates)
-        
-        return bases
+    for dir_path in dirs_to_create:
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=True)
+            logger.info(f"Created directory: {dir_path}")
+
+def main():
+    parser = argparse.ArgumentParser(description='IPO Base Breakout Strategy')
+    parser.add_argument('--mode', type=str, default='scan', 
+                       choices=['scan', 'backtest', 'both', 'setup'],
+                       help='Operation mode: scan, backtest, both, or setup')
+    parser.add_argument('--symbols', type=str, nargs='+',
+                       help='Specific symbols to scan (optional)')
+    parser.add_argument('--years', type=int, default=10,
+                       help='Number of years for backtest (default: 10)')
+    parser.add_argument('--verbose', action='store_true',
+                       help='Enable verbose logging')
     
-    def _check_base_pattern(self, df, end_idx):
-        """
-        Check if there's a valid base formation ending at end_idx
-        """
-        bases = []
+    args = parser.parse_args()
+    
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+    
+    try:
+        print_banner()
         
-        for base_days in range(self.config.MIN_BASE_DAYS, self.config.MAX_BASE_DAYS + 1):
-            start_idx = end_idx - base_days
+        # Initialize components
+        config = Config()
+        ensure_directories(config)
+        
+        logger.info(f"Data source: {config.DATA_SOURCE}")
+        logger.info(f"Mode: {args.mode}")
+        logger.info(f"Working directory: {os.getcwd()}")
+        
+        ipo_database = IPODatabase(config)
+        data_fetcher = DataFetcher(config)
+        strategy = IPOBaseBreakoutStrategy(config)
+        notifier = Notifier(config)
+        
+        logger.info(f"Loaded {len(ipo_database.get_all_ipos())} IPO stocks from database")
+        
+        if args.mode == 'setup':
+            # Run setup mode
+            logger.info("Running setup...")
+            print(f"\n🔧 Setup Information:")
+            print(f"✓ Data directory: {config.DATA_DIR}")
+            print(f"✓ Results directory: {config.RESULTS_DIR}")
+            print(f"✓ IPO database loaded: {len(ipo_database.get_all_ipos())} stocks")
+            print(f"✓ Data source: {config.DATA_SOURCE}")
             
-            if start_idx < self.config.MIN_LISTING_DAYS:
-                continue
-                
-            # Get base period data
-            base_highs = df['High'].iloc[start_idx:end_idx]
-            base_lows = df['Low'].iloc[start_idx:end_idx]
-            base_volumes = df['Volume'].iloc[start_idx:end_idx]
-            base_closes = df['Close'].iloc[start_idx:end_idx]
+            # Test data fetching
+            test_symbol = "DMART.NS"
+            print(f"\nTesting data fetch for {test_symbol}...")
+            test_df = data_fetcher.fetch_stock_data(test_symbol)
+            if test_df is not None and not test_df.empty:
+                print(f"✓ Data fetching test successful ({test_symbol})")
+                print(f"  Rows fetched: {len(test_df)}")
+                print(f"  Date range: {test_df['Date'].min()} to {test_df['Date'].max()}")
+            else:
+                print(f"✗ Data fetching test failed ({test_symbol})")
+                print("  This might be due to rate limiting. Try again later.")
             
-            # Calculate base metrics
-            base_high = base_highs.max()
-            base_low = base_lows.min()
-            base_range = base_high - base_low
-            base_range_pct = (base_range / base_high) * 100 if base_high > 0 else 0
+            print("\n✅ Setup complete!")
+            return
+        
+        if args.mode in ['scan', 'both']:
+            logger.info("Starting daily scanner...")
+            scanner = IPOBaseBreakoutScanner(config, strategy, data_fetcher, ipo_database)
             
-            # Check if base is tight (less than 15-20% range)
-            if base_range_pct > 20:
-                continue
+            try:
+                if args.symbols:
+                    # Scan specific symbols
+                    logger.info(f"Scanning specific symbols: {args.symbols}")
+                    results = scanner.scan_specific_symbols(args.symbols)
+                else:
+                    results = scanner.scan_for_opportunities()
                 
-            # Check volume drying
-            avg_volume = df['Volume'].iloc[:start_idx].mean()
-            base_avg_volume = base_volumes.mean()
-            volume_dry_ratio = base_avg_volume / avg_volume if avg_volume > 0 else 1
-            
-            if volume_dry_ratio > self.config.VOLUME_DRY_THRESHOLD:
-                continue
+                # Send notification if enabled
+                if config.ENABLE_TELEGRAM and results:
+                    opportunities = results.get('opportunities', [])
+                    if opportunities:
+                        message = notifier.format_opportunity_message(opportunities)
+                        notifier.send_telegram_notification(message)
                 
-            # Check if price is above IPO day high
-            if base_high < df['IPO_Day_High'].iloc[end_idx]:
-                continue
-                
-            # Check for breakout at end_idx
-            if df['High'].iloc[end_idx] > base_high:
-                # Volume on breakout should be high
-                volume_breakout_ratio = df['Volume'].iloc[end_idx] / df['Volume_MA20'].iloc[end_idx]
-                
-                if volume_breakout_ratio >= self.config.BREAKOUT_VOLUME_MULTIPLIER:
-                    bases.append({
-                        'start_idx': start_idx,
-                        'end_idx': end_idx,
-                        'start_date': df['Date'].iloc[start_idx],
-                        'end_date': df['Date'].iloc[end_idx],
-                        'breakout_date': df['Date'].iloc[end_idx],
-                        'base_high': base_high,
-                        'base_low': base_low,
-                        'breakout_price': df['High'].iloc[end_idx],
-                        'base_days': base_days,
-                        'base_range_pct': base_range_pct,
-                        'volume_dry_ratio': volume_dry_ratio,
-                        'volume_breakout_ratio': volume_breakout_ratio,
-                        'avg_volume': df['Volume_MA20'].iloc[end_idx],
-                        'volume_on_breakout': df['Volume'].iloc[end_idx]
-                    })
-                    break  # Only take the most recent base
+                # Display summary
+                if results:
+                    print("\n" + "="*70)
+                    print("📊 SCAN RESULTS SUMMARY")
+                    print("="*70)
                     
-        return bases
-    
-    def generate_signals(self, df):
-        """
-        Generate trading signals with enhanced filters
-        """
-        if df is None or len(df) < 20:
-            return pd.DataFrame()
+                    if results.get('opportunities'):
+                        print(f"\n🎯 BREAKOUT OPPORTUNITIES ({len(results['opportunities'])}):")
+                        for opp in results['opportunities']:
+                            print(f"\n📈 {opp.get('Symbol', 'Unknown')} - {opp.get('Company', 'Unknown')}")
+                            print(f"   Entry: Above ₹{opp.get('Recent_High', 0):.2f}")
+                            print(f"   Current: ₹{opp.get('Current_Price', 0):.2f}")
+                            if opp.get('Recent_High', 0) > 0:
+                                print(f"   Stop Loss: ₹{opp['Recent_High'] * 0.9:.2f}")
+                                print(f"   Target 1: ₹{opp['Recent_High'] * 1.15:.2f}")
+                                print(f"   Target 2: ₹{opp['Recent_High'] * 1.25:.2f}")
+                    
+                    if results.get('watchlist'):
+                        print(f"\n👀 WATCHLIST ({len(results['watchlist'])}):")
+                        for item in results['watchlist'][:10]:
+                            print(f"   • {item.get('Symbol', 'Unknown')} - ₹{item.get('Current_Price', 0):.2f}")
+                else:
+                    print("\n📊 No results found in this scan")
+                    
+            except Exception as scan_error:
+                logger.error(f"Error during scanning: {scan_error}")
+                logger.error(traceback.format_exc())
+                print(f"\n❌ Scan error: {scan_error}")
+                # Continue execution - don't exit
         
-        df = self.calculate_indicators(df)
-        bases = self.identify_base_formation(df)
-        
-        signals = []
-        
-        for base in bases:
-            # Additional filters
-            entry_price = base['breakout_price']
-            stop_loss = entry_price * (1 - self.config.INITIAL_STOP_PERCENT / 100)
-            target_1 = entry_price * (1 + self.config.TARGET_1_PERCENT / 100)
-            target_2 = entry_price * (1 + self.config.TARGET_2_PERCENT / 100)
+        if args.mode in ['backtest', 'both']:
+            logger.info("Starting backtest...")
             
-            # Risk-Reward check
-            risk = entry_price - stop_loss
-            reward_1 = target_1 - entry_price
-            reward_2 = target_2 - entry_price
-            
-            rr_ratio_1 = reward_1 / risk if risk > 0 else 0
-            rr_ratio_2 = reward_2 / risk if risk > 0 else 0
-            
-            # Only take trades with good risk-reward
-            if rr_ratio_1 < 1.5:
-                continue
+            try:
+                # Adjust start date based on years parameter
+                from datetime import timedelta
+                start_date = (datetime.now() - timedelta(days=365 * args.years)).strftime('%Y-%m-%d')
+                config.START_DATE = start_date
                 
-            signal = {
-                'Symbol': df['Symbol'].iloc[0] if 'Symbol' in df.columns else 'Unknown',
-                'Entry_Price': entry_price,
-                'Initial_Stop': stop_loss,
-                'Target_1': target_1,
-                'Target_2': target_2,
-                'RR_Ratio_1': rr_ratio_1,
-                'RR_Ratio_2': rr_ratio_2,
-                'Base_Days': base['base_days'],
-                'Base_Range_Pct': base['base_range_pct'],
-                'Volume_Dry_Ratio': base['volume_dry_ratio'],
-                'Volume_Breakout_Ratio': base['volume_breakout_ratio'],
-                'Breakout_Date': base['breakout_date'],
-                'Base_High': base['base_high'],
-                'Base_Low': base['base_low']
-            }
-            
-            signals.append(signal)
+                backtest = BacktestEngine(config, strategy, data_fetcher, ipo_database)
+                results = backtest.run_backtest()
+                
+                if results is not None and not results.empty:
+                    logger.info(f"Backtest completed with {len(results)} trades")
+                    print("\n✅ Backtest completed successfully!")
+                    print(f"Total trades executed: {len(results)}")
+                    print(f"Results saved in: {config.RESULTS_DIR}")
+            except Exception as bt_error:
+                logger.error(f"Error during backtest: {bt_error}")
+                logger.error(traceback.format_exc())
+                print(f"\n❌ Backtest error: {bt_error}")
         
-        return pd.DataFrame(signals)
+        logger.info("Process completed successfully")
+        print("\n✅ Process completed!")
+        
+    except Exception as e:
+        logger.error(f"Error in main execution: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        # Send error notification if configured
+        try:
+            if 'config' in locals() and config.ENABLE_TELEGRAM:
+                notifier = Notifier(config)
+                error_message = f"❌ Error in IPO Scanner:\n{str(e)}"
+                notifier.send_telegram_notification(error_message)
+        except:
+            pass
+        
+        print(f"\n❌ Error: {str(e)}")
+        print("\nStack trace:")
+        traceback.print_exc()
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
