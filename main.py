@@ -1,119 +1,199 @@
 """
-Main application for IPO Base Breakout Strategy
+IPO Base Breakout Strategy Implementation
+Enhanced with better base detection and volume analysis
 """
 
-import argparse
-from datetime import datetime
-import sys
-import os
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
 
-# Add src to path
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
-
-from config import Config
-from data_fetcher import DataFetcher
-from ipo_database import IPODatabase
-from strategy import IPOBaseBreakoutStrategy
-from backtest import BacktestEngine
-from scanner import IPOBaseBreakoutScanner
-from notifier import Notifier
-
-def print_banner():
-    """Print application banner"""
-    print("\n" + "="*70)
-    print("📈 IPO BASE BREAKOUT STRATEGY - INDIA")
-    print("="*70)
-    print(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("="*70)
-
-def main():
-    parser = argparse.ArgumentParser(description='IPO Base Breakout Strategy')
-    parser.add_argument('--mode', type=str, default='scan', 
-                       choices=['scan', 'backtest', 'both', 'setup'],
-                       help='Operation mode: scan, backtest, both, or setup')
-    parser.add_argument('--symbols', type=str, nargs='+',
-                       help='Specific symbols to scan (optional)')
-    parser.add_argument('--years', type=int, default=10,
-                       help='Number of years for backtest (default: 10)')
-    
-    args = parser.parse_args()
-    
-    print_banner()
-    
-    # Initialize components
-    config = Config()
-    config.ensure_directories()
-    
-    ipo_database = IPODatabase(config)
-    data_fetcher = DataFetcher(config)
-    strategy = IPOBaseBreakoutStrategy(config)
-    scanner = IPOBaseBreakoutScanner(config, strategy, data_fetcher, ipo_database)
-    notifier = Notifier(config)
-    
-    if args.mode == 'setup':
-        # Run setup mode
-        print("\n🔧 Running setup...")
-        print(f"✓ Data directory created: {config.DATA_DIR}")
-        print(f"✓ Results directory created: {config.RESULTS_DIR}")
-        print(f"✓ IPO database loaded: {len(ipo_database.get_all_ipos())} stocks")
-        print(f"✓ Data source: {config.DATA_SOURCE}")
-        print("\n✅ Setup complete!")
-        return
-    
-    if args.mode in ['scan', 'both']:
-        print("\n📊 Running Daily Scanner...")
+class IPOBaseBreakoutStrategy:
+    def __init__(self, config):
+        self.config = config
         
-        if args.symbols:
-            # Scan specific symbols
-            print(f"Scanning specific symbols: {args.symbols}")
-            # Implementation for specific symbols
-        else:
-            results = scanner.scan_for_opportunities()
+    def calculate_indicators(self, df):
+        """
+        Calculate technical indicators for the strategy
+        """
+        if df is None or len(df) < 20:
+            return None
             
-            # Send notification if enabled
-            if config.ENABLE_TELEGRAM:
-                opportunities = results.get('opportunities', [])
-                message = notifier.format_opportunity_message(opportunities)
-                notifier.send_telegram_notification(message)
+        df = df.copy()
+        
+        # Moving averages
+        df['MA5'] = df['Close'].rolling(window=5).mean()
+        df['MA10'] = df['Close'].rolling(window=10).mean()
+        df['MA20'] = df['Close'].rolling(window=20).mean()
+        df['MA50'] = df['Close'].rolling(window=50).mean()
+        df['MA200'] = df['Close'].rolling(window=200).mean()
+        
+        # Volume indicators
+        df['Volume_MA5'] = df['Volume'].rolling(window=5).mean()
+        df['Volume_MA10'] = df['Volume'].rolling(window=10).mean()
+        df['Volume_MA20'] = df['Volume'].rolling(window=20).mean()
+        df['Volume_MA50'] = df['Volume'].rolling(window=50).mean()
+        df['Volume_Ratio'] = df['Volume'] / df['Volume_MA20']
+        
+        # Price indicators
+        df['High_20'] = df['High'].rolling(window=20).max()
+        df['Low_20'] = df['Low'].rolling(window=20).min()
+        df['High_50'] = df['High'].rolling(window=50).max()
+        
+        # Volatility
+        df['TR'] = np.maximum(
+            df['High'] - df['Low'],
+            np.maximum(
+                abs(df['High'] - df['Close'].shift(1)),
+                abs(df['Low'] - df['Close'].shift(1))
+            )
+        )
+        df['ATR'] = df['TR'].rolling(window=14).mean()
+        df['ATR_Pct'] = (df['ATR'] / df['Close']) * 100
+        
+        # IPO Day High (first trading day high)
+        df['IPO_Day_High'] = df['High'].iloc[0] if len(df) > 0 else 0
+        
+        # Price position
+        df['Pct_From_High'] = ((df['Close'] - df['IPO_Day_High']) / df['IPO_Day_High']) * 100
+        
+        return df
+    
+    def identify_base_formation(self, df):
+        """
+        Identify base formation pattern with improved detection
+        """
+        if df is None or len(df) < self.config.MIN_BASE_DAYS:
+            return []
+        
+        bases = []
+        
+        for i in range(self.config.MIN_LISTING_DAYS, len(df)):
+            # Check for potential base formation
+            if i + self.config.MIN_BASE_DAYS > len(df):
+                break
+                
+            # Look for consolidation pattern
+            base_candidates = self._check_base_pattern(df, i)
             
-            # Display summary
-            if results:
-                print("\n" + "="*70)
-                print("📊 SCAN RESULTS SUMMARY")
-                print("="*70)
-                
-                if results['opportunities']:
-                    print(f"\n🎯 BREAKOUT OPPORTUNITIES ({len(results['opportunities'])}):")
-                    for opp in results['opportunities']:
-                        print(f"\n📈 {opp['Symbol']} - {opp['Company']}")
-                        print(f"   Entry: Above ₹{opp['Recent_High']}")
-                        print(f"   Current: ₹{opp['Current_Price']}")
-                        print(f"   Stop Loss: ₹{opp['Recent_High'] * 0.9:.2f}")
-                        print(f"   Target 1: ₹{opp['Recent_High'] * 1.15:.2f}")
-                        print(f"   Target 2: ₹{opp['Recent_High'] * 1.25:.2f}")
-                
-                if results['watchlist']:
-                    print(f"\n👀 WATCHLIST ({len(results['watchlist'])}):")
-                    for item in results['watchlist'][:10]:
-                        print(f"   • {item['Symbol']} - ₹{item['Current_Price']}")
+            if base_candidates:
+                bases.extend(base_candidates)
+        
+        return bases
     
-    if args.mode in ['backtest', 'both']:
-        print("\n📈 Running Backtest...")
+    def _check_base_pattern(self, df, end_idx):
+        """
+        Check if there's a valid base formation ending at end_idx
+        """
+        bases = []
         
-        # Adjust start date based on years parameter
-        from datetime import timedelta
-        start_date = (datetime.now() - timedelta(days=365 * args.years)).strftime('%Y-%m-%d')
-        config.START_DATE = start_date
-        
-        backtest = BacktestEngine(config, strategy, data_fetcher, ipo_database)
-        results = backtest.run_backtest()
-        
-        if results is not None and not results.empty:
-            print("\n✅ Backtest completed successfully!")
-            print(f"Total trades executed: {len(results)}")
-            print(f"Results saved in: {config.RESULTS_DIR}")
+        for base_days in range(self.config.MIN_BASE_DAYS, self.config.MAX_BASE_DAYS + 1):
+            start_idx = end_idx - base_days
+            
+            if start_idx < self.config.MIN_LISTING_DAYS:
+                continue
+                
+            # Get base period data
+            base_highs = df['High'].iloc[start_idx:end_idx]
+            base_lows = df['Low'].iloc[start_idx:end_idx]
+            base_volumes = df['Volume'].iloc[start_idx:end_idx]
+            base_closes = df['Close'].iloc[start_idx:end_idx]
+            
+            # Calculate base metrics
+            base_high = base_highs.max()
+            base_low = base_lows.min()
+            base_range = base_high - base_low
+            base_range_pct = (base_range / base_high) * 100 if base_high > 0 else 0
+            
+            # Check if base is tight (less than 15-20% range)
+            if base_range_pct > 20:
+                continue
+                
+            # Check volume drying
+            avg_volume = df['Volume'].iloc[:start_idx].mean()
+            base_avg_volume = base_volumes.mean()
+            volume_dry_ratio = base_avg_volume / avg_volume if avg_volume > 0 else 1
+            
+            if volume_dry_ratio > self.config.VOLUME_DRY_THRESHOLD:
+                continue
+                
+            # Check if price is above IPO day high
+            if base_high < df['IPO_Day_High'].iloc[end_idx]:
+                continue
+                
+            # Check for breakout at end_idx
+            if df['High'].iloc[end_idx] > base_high:
+                # Volume on breakout should be high
+                volume_breakout_ratio = df['Volume'].iloc[end_idx] / df['Volume_MA20'].iloc[end_idx]
+                
+                if volume_breakout_ratio >= self.config.BREAKOUT_VOLUME_MULTIPLIER:
+                    bases.append({
+                        'start_idx': start_idx,
+                        'end_idx': end_idx,
+                        'start_date': df['Date'].iloc[start_idx],
+                        'end_date': df['Date'].iloc[end_idx],
+                        'breakout_date': df['Date'].iloc[end_idx],
+                        'base_high': base_high,
+                        'base_low': base_low,
+                        'breakout_price': df['High'].iloc[end_idx],
+                        'base_days': base_days,
+                        'base_range_pct': base_range_pct,
+                        'volume_dry_ratio': volume_dry_ratio,
+                        'volume_breakout_ratio': volume_breakout_ratio,
+                        'avg_volume': df['Volume_MA20'].iloc[end_idx],
+                        'volume_on_breakout': df['Volume'].iloc[end_idx]
+                    })
+                    break  # Only take the most recent base
+                    
+        return bases
     
-    print("\n✅ Process completed!")
-
-if __name__ == "__main__":
-    main()
+    def generate_signals(self, df):
+        """
+        Generate trading signals with enhanced filters
+        """
+        if df is None or len(df) < 20:
+            return pd.DataFrame()
+        
+        df = self.calculate_indicators(df)
+        bases = self.identify_base_formation(df)
+        
+        signals = []
+        
+        for base in bases:
+            # Additional filters
+            entry_price = base['breakout_price']
+            stop_loss = entry_price * (1 - self.config.INITIAL_STOP_PERCENT / 100)
+            target_1 = entry_price * (1 + self.config.TARGET_1_PERCENT / 100)
+            target_2 = entry_price * (1 + self.config.TARGET_2_PERCENT / 100)
+            
+            # Risk-Reward check
+            risk = entry_price - stop_loss
+            reward_1 = target_1 - entry_price
+            reward_2 = target_2 - entry_price
+            
+            rr_ratio_1 = reward_1 / risk if risk > 0 else 0
+            rr_ratio_2 = reward_2 / risk if risk > 0 else 0
+            
+            # Only take trades with good risk-reward
+            if rr_ratio_1 < 1.5:
+                continue
+                
+            signal = {
+                'Symbol': df['Symbol'].iloc[0] if 'Symbol' in df.columns else 'Unknown',
+                'Entry_Price': entry_price,
+                'Initial_Stop': stop_loss,
+                'Target_1': target_1,
+                'Target_2': target_2,
+                'RR_Ratio_1': rr_ratio_1,
+                'RR_Ratio_2': rr_ratio_2,
+                'Base_Days': base['base_days'],
+                'Base_Range_Pct': base['base_range_pct'],
+                'Volume_Dry_Ratio': base['volume_dry_ratio'],
+                'Volume_Breakout_Ratio': base['volume_breakout_ratio'],
+                'Breakout_Date': base['breakout_date'],
+                'Base_High': base['base_high'],
+                'Base_Low': base['base_low']
+            }
+            
+            signals.append(signal)
+        
+        return pd.DataFrame(signals)
