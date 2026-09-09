@@ -6,7 +6,7 @@ on:
     - cron: '30 9 * * *'
   workflow_dispatch:  # Allow manual trigger
   push:
-    branches: [ main ]  # Optional: run on push to main
+    branches: [ main ]  # Run on push for testing
 
 jobs:
   scan:
@@ -14,52 +14,66 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4  # Updated from v3 to v4
+      uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v5  # Updated from v4 to v5
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
-        cache: 'pip'  # Enable pip caching
-    
-    - name: Cache pip packages
-      uses: actions/cache@v4  # Updated from v3 to v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
     
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
     
+    - name: Create results directory
+      run: |
+        mkdir -p results
+        mkdir -p data
+        echo "Results directory created"
+    
     - name: Run daily scanner
       env:
-        # Optional: Add Alpha Vantage API key
+        TZ: 'Asia/Kolkata'
         ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
-        # Optional: Telegram notifications
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        # Set timezone to IST for correct timestamps
-        TZ: 'Asia/Kolkata'
+        PYTHONPATH: ${{ github.workspace }}/src
       run: |
-        python main.py --mode scan
+        python main.py --mode scan --verbose
+    
+    - name: Check results directory
+      run: |
+        echo "Checking results directory..."
+        ls -la results/ || echo "Results directory is empty"
+        echo "Checking data directory..."
+        ls -la data/ || echo "Data directory is empty"
     
     - name: Upload scan results
-      uses: actions/upload-artifact@v4  # Updated from v3 to v4
+      uses: actions/upload-artifact@v4
       with:
-        name: scan-results-${{ github.run_id }}  # Unique name per run
-        path: results/
+        name: scan-results-${{ github.run_id }}
+        path: |
+          results/
+          scanner.log
         retention-days: 30
-        compression-level: 6  # Optional compression
+      if: always()
     
     - name: Commit and push results
       run: |
         git config --global user.name 'GitHub Action'
         git config --global user.email 'action@github.com'
-        git add results/
-        git diff --quiet && git diff --staged --quiet || (git commit -m "Update scan results $(date +'%Y-%m-%d')" && git push)
+        
+        # Add all files including logs
+        git add results/ data/ scanner.log 2>/dev/null || true
+        
+        # Check if there are changes to commit
+        if git diff --quiet && git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          git commit -m "Update scan results $(date +'%Y-%m-%d %H:%M:%S IST')"
+          git push
+        fi
+      if: always()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
